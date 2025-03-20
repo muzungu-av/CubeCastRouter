@@ -1,5 +1,5 @@
 use actix::{dev::OneshotSender, prelude::*};
-
+use actix_cors::Cors;
 use actix_web::{
     web::{self, Bytes},
     App, Error, HttpRequest, HttpResponse, HttpServer, Responder,
@@ -188,6 +188,12 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(state.clone())
             .app_data(web::Data::new(broadcast_srv.clone()))
+            .wrap(
+                Cors::default()
+                    .allow_any_origin()
+                    .allow_any_method()
+                    .allow_any_header(),
+            )
             .route("/ws", web::get().to(ws_handler))
             .route("/sse", web::get().to(sse_handler))
             .route("/long-polling", web::get().to(long_polling_handler))
