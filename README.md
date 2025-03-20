@@ -62,14 +62,14 @@ cargo run --release
 ### Подключение по WebSocket
 
 ```javascript
-const ws = new WebSocket("ws://localhost:8080/ws");
+const ws = new WebSocket("ws://localhost:7070/ws");
 ws.onmessage = (event) => console.log("Новое сообщение:", event.data);
 ```
 
 ### Подписка через SSE
 
 ```javascript
-const eventSource = new EventSource("http://localhost:8080/sse");
+const eventSource = new EventSource("http://localhost:7070/sse");
 eventSource.onmessage = (event) => console.log("Новое сообщение:", event.data);
 ```
 
@@ -77,16 +77,10 @@ eventSource.onmessage = (event) => console.log("Новое сообщение:",
 
 ```javascript
 async function poll() {
-    const response = await fetch("http://localhost:8080/long-polling");
+    const response = await fetch("http://localhost:7070/long-polling");
     const data = await response.json();
     console.log("Новое сообщение:", data);
     setTimeout(poll, 2000);
 }
 poll();
 ```
-
-## Контакты
-
-Разработчик: **Your Name**\
-Email: [**your.email@example.com**](mailto\:your.email@example.com)
-
