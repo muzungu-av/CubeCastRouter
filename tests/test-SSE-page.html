@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+    <meta charset="UTF-8">
+    <title>SSE Test</title>
+</head>
+
+<body>
+    <h1>SSE Test</h1>
+    <div id="messages"></div>
+    <script>
+        const eventSource = new EventSource("http://127.0.0.1:7070/sse");
+        eventSource.onmessage = function (event) {
+            const msgDiv = document.getElementById("messages");
+            const newMsg = document.createElement("p");
+            newMsg.textContent = "Получено: " + event.data;
+            msgDiv.appendChild(newMsg);
+        };
+    </script>
+</body>
+
+</html>
