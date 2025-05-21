@@ -30,7 +30,6 @@ impl AppState {
     }
 }
 
-// --- WebSocket актор ---
 struct MyWs {
     addr: Addr<BroadcastServer>,
 }
@@ -40,8 +39,8 @@ impl actix::Actor for MyWs {
 
     fn started(&mut self, ctx: &mut Self::Context) {
         let addr = ctx.address().recipient();
-        self.addr
-            .do_send(ClientMessage(format!("Новый клиент подключился")));
+        // Новый клиент подключился
+        // self.addr.do_send(ClientMessage(format!("Новый клиент подключился")));
         self.addr.do_send(RegisterSubscriber(addr));
     }
 }
@@ -103,7 +102,7 @@ struct BroadcastServer {
 }
 
 impl BroadcastServer {
-    // Теперь BroadcastServer хранит ссылку на AppState,
+    // BroadcastServer хранит ссылку на AppState,
     // чтобы можно было отправлять сообщения SSE и Long Polling подписчикам.
     fn new(app_state: web::Data<AppState>) -> Self {
         Self {
