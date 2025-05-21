@@ -133,7 +133,14 @@ impl Handler<ClientMessage> for BroadcastServer {
         // Отправляем сообщение подписчикам WebSocket.
         {
             let mut ws_subs = self.subscribers.lock().unwrap();
-            ws_subs.retain(|sub| sub.try_send(msg.clone()).is_ok());
+            ws_subs.retain(|sub| {
+                if let Err(e) = sub.try_send(msg.clone()) {
+                    eprintln!("[WebSocket] Ошибка отправки: {:?}", e);
+                    false
+                } else {
+                    true
+                }
+            });
         }
         // Отправляем сообщение подписчикам SSE.
         {
