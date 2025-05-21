@@ -9,6 +9,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tokio_stream::wrappers::UnboundedReceiverStream;
+mod http_api;
 
 // --- Определение структуры для сообщений ---
 #[derive(Message, Clone, serde::Deserialize, serde::Serialize, Debug)]
@@ -116,6 +117,17 @@ impl Actor for BroadcastServer {
     type Context = Context<Self>;
 }
 
+#[derive(Message)]
+#[rtype(result = "usize")]
+struct GetWsCount;
+// количество WS подписчиков
+impl Handler<GetWsCount> for BroadcastServer {
+    type Result = usize;
+    fn handle(&mut self, _: GetWsCount, _: &mut Context<Self>) -> Self::Result {
+        self.subscribers.lock().unwrap().len()
+    }
+}
+
 impl Handler<RegisterSubscriber> for BroadcastServer {
     type Result = ();
 
@@ -204,6 +216,7 @@ async fn main() -> std::io::Result<()> {
             .route("/sse", web::get().to(sse_handler))
             .route("/long-polling", web::get().to(long_polling_handler))
             .route("/send", web::post().to(send_message))
+            .route("/stats", web::get().to(http_api::stats))
     })
     .bind("127.0.0.1:7070")?
     .run()
