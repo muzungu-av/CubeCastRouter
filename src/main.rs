@@ -1,60 +1,93 @@
-use actix::{dev::OneshotSender, prelude::*};
+use actix::prelude::*;
 use actix_cors::Cors;
-use actix_web::{
-    web::{self, Bytes},
-    App, Error, HttpRequest, HttpResponse, HttpServer, Responder,
-};
+use actix_web::{web, App, Error, HttpRequest, HttpResponse, HttpServer, Responder};
 use actix_web_actors::ws;
-use futures_util::StreamExt;
+use actix_web_lab::sse::{Data, Event, Sse};
+use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::time::Instant;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 mod http_api;
 
-// --- Определение структуры для сообщений ---
-#[derive(Message, Clone, serde::Deserialize, serde::Serialize, Debug)]
+// --- Сообщение от клиента ---
+#[derive(Message, Clone, Deserialize, Serialize, Debug)]
 #[rtype(result = "()")]
 struct ClientMessage(String);
 
-// --- Глобальная структура для подписчиков ---
+// --- Состояние приложения ---
 struct AppState {
-    sse_subscribers: Arc<Mutex<Vec<tokio::sync::mpsc::UnboundedSender<String>>>>,
-    long_polling_subscribers: Arc<Mutex<Vec<OneshotSender<String>>>>,
+    ws_subs: Arc<Mutex<Vec<Recipient<ClientMessage>>>>,
+    sse_senders: Arc<Mutex<Vec<mpsc::UnboundedSender<String>>>>,
+    lp_senders: Arc<Mutex<Vec<oneshot::Sender<String>>>>,
 }
 
 impl AppState {
     fn new() -> Self {
         Self {
-            sse_subscribers: Arc::new(Mutex::new(Vec::new())),
-            long_polling_subscribers: Arc::new(Mutex::new(Vec::new())),
+            ws_subs: Arc::new(Mutex::new(Vec::new())),
+            sse_senders: Arc::new(Mutex::new(Vec::new())),
+            lp_senders: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
 
+// --- WebSocket актор ---
 struct MyWs {
     addr: Addr<BroadcastServer>,
+    hb: Instant, // отслеживаем последнее "pong"
 }
 
-impl actix::Actor for MyWs {
-    type Context = ws::WebsocketContext<Self>;
+impl MyWs {
+    fn hb(&self, ctx: &mut ws::WebsocketContext<Self>) {
+        ctx.run_interval(Duration::from_secs(10), |act, ctx| {
+            // если последний pong был более 30 секунд назад, закрываем соединение
+            if Instant::now().duration_since(act.hb) > Duration::from_secs(30) {
+                println!("WebSocket соединение прервано из-за таймаута");
+                ctx.stop();
+                return;
+            }
+            ctx.ping(b"");
+        });
+    }
+}
 
+impl Actor for MyWs {
+    type Context = ws::WebsocketContext<Self>;
     fn started(&mut self, ctx: &mut Self::Context) {
-        let addr = ctx.address().recipient();
-        // Новый клиент подключился
-        // self.addr.do_send(ClientMessage(format!("Новый клиент подключился")));
-        self.addr.do_send(RegisterSubscriber(addr));
+        self.hb(ctx);
+        let rec = ctx.address().recipient();
+        self.addr.do_send(RegisterWs(rec));
     }
 }
 
 #[derive(Message)]
 #[rtype(result = "()")]
-struct RegisterSubscriber(pub Recipient<ClientMessage>);
+struct RegisterWs(Recipient<ClientMessage>);
 
 impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
     fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
-        if let Ok(ws::Message::Text(text)) = msg {
-            println!("[WebSocket] Получено: {}", text);
-            self.addr.do_send(ClientMessage(text.to_string()));
+        match msg {
+            Ok(ws::Message::Ping(msg)) => {
+                self.hb = Instant::now(); // обновляем время последнего ответа
+                ctx.pong(&msg);
+            }
+            Ok(ws::Message::Pong(_)) => {
+                self.hb = Instant::now(); // обновляем pong
+            }
+            Ok(ws::Message::Text(text)) => {
+                println!("[WebSocket] Получено: {}", text);
+                self.addr.do_send(ClientMessage(text.to_string()));
+            }
+            Ok(ws::Message::Close(reason)) => {
+                println!("WebSocket закрыт: {:?}", reason);
+                ctx.stop();
+            }
+            _ => {}
         }
     }
 }
@@ -69,170 +102,126 @@ impl Handler<ClientMessage> for MyWs {
 }
 
 // --- SSE обработчик ---
-async fn sse_handler(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    state.sse_subscribers.lock().unwrap().push(tx.clone()); // Добавляем подписчика
-    println!("[SSE] Клиент подключился");
-    HttpResponse::Ok()
-        .content_type("text/event-stream")
-        .no_chunking(1024)
-        .streaming(UnboundedReceiverStream::new(rx).map(|msg| {
-            println!("[SSE] Отправлено: {}", msg);
-            Ok::<_, actix_web::Error>(Bytes::from(format!("data: {}\n\n", msg)))
-        }))
+async fn sse_handler(state: web::Data<AppState>) -> Sse<impl Stream<Item = Result<Event, Error>>> {
+    let (tx, rx) = mpsc::unbounded_channel::<String>();
+    state.sse_senders.lock().unwrap().push(tx.clone());
+
+    let event_stream =
+        UnboundedReceiverStream::new(rx).map(|msg| Ok::<Event, Error>(Event::Data(Data::new(msg))));
+
+    Sse::from_stream(event_stream).with_keep_alive(std::time::Duration::from_secs(15))
 }
 
-// --- Long Polling обработчик ---
+// --- Long Polling ---
 async fn long_polling_handler(state: web::Data<AppState>) -> impl Responder {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    // Добавляем в список подписчиков для Long Polling
-    state.long_polling_subscribers.lock().unwrap().push(tx);
-    println!("[Long Polling] Клиент ожидает сообщение");
-    let response = rx.await.unwrap_or_else(|_| "timeout".to_string());
-    println!("[Long Polling] Отправлено: {}", response);
-    HttpResponse::Ok().json(response)
+    let (tx, rx) = oneshot::channel();
+    state.lp_senders.lock().unwrap().push(tx);
+    let res = rx.await.unwrap_or_else(|_| "timeout".into());
+    HttpResponse::Ok().json(res)
 }
 
-// --- Сервер рассылки сообщений ---
-#[derive(Message)]
-#[rtype(result = "()")]
-
+// --- BroadcastServer: рассылка по всем трём типам ---
 struct BroadcastServer {
-    subscribers: Arc<Mutex<Vec<Recipient<ClientMessage>>>>,
-    app_state: web::Data<AppState>,
+    state: web::Data<AppState>,
 }
 
 impl BroadcastServer {
-    // BroadcastServer хранит ссылку на AppState,
-    // чтобы можно было отправлять сообщения SSE и Long Polling подписчикам.
-    fn new(app_state: web::Data<AppState>) -> Self {
-        Self {
-            subscribers: Arc::new(Mutex::new(Vec::new())),
-            app_state,
-        }
+    fn new(state: web::Data<AppState>) -> Self {
+        Self { state }
     }
 }
-
 impl Actor for BroadcastServer {
     type Context = Context<Self>;
-}
-
-#[derive(Message)]
-#[rtype(result = "usize")]
-struct GetWsCount;
-// количество WS подписчиков
-impl Handler<GetWsCount> for BroadcastServer {
-    type Result = usize;
-    fn handle(&mut self, _: GetWsCount, _: &mut Context<Self>) -> Self::Result {
-        self.subscribers.lock().unwrap().len()
+    fn started(&mut self, ctx: &mut Self::Context) {
+        // Heartbeat: без реальных данных, чистим мёртвые SSE-соединения
+        ctx.run_interval(Duration::from_secs(2), |act, _| {
+            //sse
+            let mut senders = act.state.sse_senders.lock().unwrap();
+            senders.retain(|tx| tx.send(String::new()).is_ok());
+            //ws
+            let mut subs = act.state.ws_subs.lock().unwrap();
+            subs.retain(|rec| rec.try_send(ClientMessage("ping".into())).is_ok());
+        });
     }
 }
 
-impl Handler<RegisterSubscriber> for BroadcastServer {
+impl Handler<RegisterWs> for BroadcastServer {
     type Result = ();
-
-    fn handle(&mut self, msg: RegisterSubscriber, _: &mut Self::Context) {
-        self.subscribers.lock().unwrap().push(msg.0);
-        println!("[Broadcast] Клиент зарегистрирован");
+    fn handle(&mut self, msg: RegisterWs, _: &mut Self::Context) {
+        self.state.ws_subs.lock().unwrap().push(msg.0);
     }
 }
 
 impl Handler<ClientMessage> for BroadcastServer {
     type Result = ();
-
     fn handle(&mut self, msg: ClientMessage, _: &mut Self::Context) {
-        println!("[Broadcast] Рассылка сообщения: {}", msg.0);
-        // Отправляем сообщение подписчикам WebSocket.
+        let txt = msg.0.clone();
+
+        // 1) WebSocket
         {
-            let mut ws_subs = self.subscribers.lock().unwrap();
-            ws_subs.retain(|sub| {
-                if let Err(e) = sub.try_send(msg.clone()) {
-                    eprintln!("[WebSocket] Ошибка отправки: {:?}", e);
-                    false
-                } else {
-                    true
-                }
-            });
+            let mut subs = self.state.ws_subs.lock().unwrap();
+            subs.retain(|rec| rec.try_send(msg.clone()).is_ok());
         }
-        // Отправляем сообщение подписчикам SSE.
+
+        // 2) SSE
         {
-            let mut sse_subs = self.app_state.sse_subscribers.lock().unwrap();
-            sse_subs.retain(|sub| sub.send(msg.0.clone()).is_ok());
+            let mut senders = self.state.sse_senders.lock().unwrap();
+            senders.retain(|tx| tx.send(txt.clone()).is_ok());
         }
-        // Отправляем сообщение подписчикам Long Polling (одноразовые каналы, поэтому удаляем их).
+
+        // 3) Long Polling
         {
-            let mut lp_subs = self.app_state.long_polling_subscribers.lock().unwrap();
-            while let Some(sub) = lp_subs.pop() {
-                let _ = sub.send(msg.0.clone());
+            let mut lps = self.state.lp_senders.lock().unwrap();
+            while let Some(tx) = lps.pop() {
+                let _ = tx.send(txt.clone());
             }
         }
     }
 }
 
-// --- Обработчик WebSocket ---
-async fn ws_handler(
+// --- WebSocket маршрут ---
+async fn ws_route(
     req: HttpRequest,
     stream: web::Payload,
     srv: web::Data<Addr<BroadcastServer>>,
 ) -> Result<HttpResponse, Error> {
-    let resp = ws::start(
+    ws::start(
         MyWs {
             addr: srv.get_ref().clone(),
+            hb: Instant::now(),
         },
         &req,
         stream,
-    );
-    println!("[WebSocket] Клиент подключился");
-    resp
+    )
 }
 
-async fn send_message(
-    broadcast_srv: web::Data<Addr<BroadcastServer>>,
+// --- POST /send ---
+async fn send_msg(
+    srv: web::Data<Addr<BroadcastServer>>,
     msg: web::Json<ClientMessage>,
 ) -> impl Responder {
-    println!("[API] Получен POST /send:  {:#?}", msg.0);
-    // Отправляем сообщение через BroadcastServer, который разошлёт его всем типам подписчиков.
-    broadcast_srv.do_send(msg.0.clone());
-    HttpResponse::Ok().json("Message sent")
+    srv.do_send(msg.0.clone());
+    HttpResponse::Ok().body("sent")
 }
 
-// --- Запуск сервера ---
+// --- main ---
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let state = web::Data::new(AppState::new());
-    let broadcast_srv = BroadcastServer::new(state.clone()).start();
-    println!("[Server] Запуск на 127.0.0.1:7070");
+    let srv = BroadcastServer::new(state.clone()).start();
+
     HttpServer::new(move || {
         App::new()
             .app_data(state.clone())
-            .app_data(web::Data::new(broadcast_srv.clone()))
-            .wrap(
-                Cors::default()
-                    .allow_any_origin()
-                    .allow_any_method()
-                    .allow_any_header(),
-            )
-            .route("/ws", web::get().to(ws_handler))
+            .app_data(web::Data::new(srv.clone()))
+            .wrap(Cors::default().allow_any_origin())
+            .route("/ws", web::get().to(ws_route))
             .route("/sse", web::get().to(sse_handler))
             .route("/long-polling", web::get().to(long_polling_handler))
-            .route("/send", web::post().to(send_message))
+            .route("/send", web::post().to(send_msg))
             .route("/stats", web::get().to(http_api::stats))
     })
-    .bind("127.0.0.1:7070")?
+    .bind(("127.0.0.1", 7070))?
     .run()
     .await
 }
-
-/*
-Можно отправлять события с разными типами
-
-fn get_stream() -> impl Stream<Item = Result<Bytes, actix_web::Error>> {
-    interval(Duration::from_secs(2))
-        .map(|_| Ok(Bytes::from("event: update\ndata: {\"message\": \"обновлено\"}\n\n")))
-}
-
-В React:
-eventSource.addEventListener("update", (event) => {
-  console.log("Получено обновление:", event.data);
-});
-*/
