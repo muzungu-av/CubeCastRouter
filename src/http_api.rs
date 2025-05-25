@@ -1,4 +1,4 @@
-use crate::{AppState, BroadcastServer};
+use crate::{AppState, BroadcastServer, GetCount};
 use actix::prelude::*;
 use actix_web::{web, HttpResponse, Responder};
 use serde::Serialize;
@@ -19,10 +19,12 @@ pub async fn stats(
     let ws_count = srv.send(GetCount).await.unwrap_or(0);
 
     // получаем количество SSE-подписчиков
-    let sse_count = state.sse_senders.lock().unwrap().len();
+    let sse = state.sse_senders.lock().await;
+    let sse_count = sse.len();
 
     // получаем количество Long Polling-подписчиков
-    let lp_count = state.lp_senders.lock().unwrap().len();
+    let lp = state.lp_senders.lock().await;
+    let lp_count = lp.len();
 
     let result = Stats {
         ws: ws_count,
@@ -31,14 +33,4 @@ pub async fn stats(
     };
 
     HttpResponse::Ok().json(result)
-}
-
-#[derive(Message)]
-#[rtype(result = "usize")]
-struct GetCount;
-impl Handler<GetCount> for BroadcastServer {
-    type Result = usize;
-    fn handle(&mut self, _: GetCount, _: &mut Context<Self>) -> Self::Result {
-        self.state.ws_subs.lock().unwrap().len()
-    }
 }

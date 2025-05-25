@@ -6,10 +6,8 @@ use actix_web_lab::sse::{Data, Event, Sse};
 use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
+use tokio::sync::Mutex;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 mod http_api;
@@ -104,7 +102,8 @@ impl Handler<ClientMessage> for MyWs {
 // --- SSE обработчик ---
 async fn sse_handler(state: web::Data<AppState>) -> Sse<impl Stream<Item = Result<Event, Error>>> {
     let (tx, rx) = mpsc::unbounded_channel::<String>();
-    state.sse_senders.lock().unwrap().push(tx.clone());
+    let mut senders = state.sse_senders.lock().await;
+    senders.push(tx.clone());
 
     let event_stream =
         UnboundedReceiverStream::new(rx).map(|msg| Ok::<Event, Error>(Event::Data(Data::new(msg))));
@@ -115,7 +114,11 @@ async fn sse_handler(state: web::Data<AppState>) -> Sse<impl Stream<Item = Resul
 // --- Long Polling ---
 async fn long_polling_handler(state: web::Data<AppState>) -> impl Responder {
     let (tx, rx) = oneshot::channel();
-    state.lp_senders.lock().unwrap().push(tx);
+    {
+        let mut lp_senders = state.lp_senders.lock().await;
+        lp_senders.push(tx);
+    }
+
     let res = rx.await.unwrap_or_else(|_| "timeout".into());
     HttpResponse::Ok().json(res)
 }
@@ -130,17 +133,41 @@ impl BroadcastServer {
         Self { state }
     }
 }
+
+#[derive(Message)]
+#[rtype(result = "usize")]
+struct GetCount;
+impl Handler<GetCount> for BroadcastServer {
+    type Result = ResponseFuture<usize>;
+    fn handle(&mut self, _: GetCount, _: &mut Context<Self>) -> Self::Result {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let ws = state.ws_subs.lock().await;
+            ws.len()
+        })
+    }
+}
+
 impl Actor for BroadcastServer {
     type Context = Context<Self>;
     fn started(&mut self, ctx: &mut Self::Context) {
+        let state = self.state.clone();
         // Heartbeat: без реальных данных, чистим мёртвые SSE-соединения
-        ctx.run_interval(Duration::from_secs(2), |act, _| {
-            //sse
-            let mut senders = act.state.sse_senders.lock().unwrap();
-            senders.retain(|tx| tx.send(String::new()).is_ok());
-            //ws
-            let mut subs = act.state.ws_subs.lock().unwrap();
-            subs.retain(|rec| rec.try_send(ClientMessage("ping".into())).is_ok());
+        ctx.run_interval(Duration::from_secs(2), move |_act, _ctx| {
+            let state = state.clone();
+            actix::spawn(async move {
+                // SSE: отправляем ping (пустую строку), удаляем отвалившиеся соединения
+                {
+                    let mut senders = state.sse_senders.lock().await;
+                    senders.retain(|tx| tx.send(String::new()).is_ok());
+                }
+
+                // WebSocket: отправляем ping
+                {
+                    let mut subs = state.ws_subs.lock().await;
+                    subs.retain(|rec| rec.try_send(ClientMessage("ping".into())).is_ok());
+                }
+            });
         });
     }
 }
@@ -148,7 +175,13 @@ impl Actor for BroadcastServer {
 impl Handler<RegisterWs> for BroadcastServer {
     type Result = ();
     fn handle(&mut self, msg: RegisterWs, _: &mut Self::Context) {
-        self.state.ws_subs.lock().unwrap().push(msg.0);
+        let state = self.state.clone();
+        let recipient = msg.0;
+
+        actix::spawn(async move {
+            let mut subs = state.ws_subs.lock().await;
+            subs.push(recipient);
+        });
     }
 }
 
@@ -156,26 +189,28 @@ impl Handler<ClientMessage> for BroadcastServer {
     type Result = ();
     fn handle(&mut self, msg: ClientMessage, _: &mut Self::Context) {
         let txt = msg.0.clone();
-
-        // 1) WebSocket
-        {
-            let mut subs = self.state.ws_subs.lock().unwrap();
-            subs.retain(|rec| rec.try_send(msg.clone()).is_ok());
-        }
-
-        // 2) SSE
-        {
-            let mut senders = self.state.sse_senders.lock().unwrap();
-            senders.retain(|tx| tx.send(txt.clone()).is_ok());
-        }
-
-        // 3) Long Polling
-        {
-            let mut lps = self.state.lp_senders.lock().unwrap();
-            while let Some(tx) = lps.pop() {
-                let _ = tx.send(txt.clone());
+        let state = self.state.clone();
+        actix::spawn(async move {
+            // 1) WebSocket
+            {
+                let mut subs = state.ws_subs.lock().await;
+                subs.retain(|rec| rec.try_send(msg.clone()).is_ok());
             }
-        }
+
+            // 2) SSE
+            {
+                let mut senders = state.sse_senders.lock().await;
+                senders.retain(|tx| tx.send(txt.clone()).is_ok());
+            }
+
+            // 3) Long Polling
+            {
+                let mut lps = state.lp_senders.lock().await;
+                while let Some(tx) = lps.pop() {
+                    let _ = tx.send(txt.clone());
+                }
+            }
+        });
     }
 }
 
