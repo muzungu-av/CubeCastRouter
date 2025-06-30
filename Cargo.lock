@@ -14,6 +14,7 @@ dependencies = [
  "async-stream",
  "futures-core",
  "futures-util",
+ "once_cell",
  "serde",
  "serde_json",
  "tokio",
