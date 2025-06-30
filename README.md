@@ -50,14 +50,14 @@
 
 ```sh
 # Клонируем репозиторий
-git clone https://github.com/your-repo/cube-cast.git
-cd cube-cast
+git clone https://github.com/muzungu-av/CubeCastRouter_pub.git
+cd CubeCastRouter_pub
 
 # Собираем и запускаем
 cargo run --release
 ```
 
-## API (Примеры запросов)
+## API Примеры запросов (Немного устарели после валидации)
 
 ### Подключение по WebSocket
 
