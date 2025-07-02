@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Главная - Выбор способа соединения</title>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <style>
+        body {
+            font-family: sans-serif;
+            margin: 20px;
+        }
+
+        .header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .header select,
+        .header input {
+            padding: 5px;
+        }
+
+        .header button {
+            padding: 6px 12px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="header">
+        <label for="method">Способ соединения:</label>
+        <select id="method">
+            <option>WebSocket</option>
+            <option>SSE</option>
+            <option>Long Polling</option>
+        </select>
+        <input type="text" id="url" placeholder="URL backend" size="30" />
+        <input type="text" id="userId" placeholder="ID пользователя" size="15" />
+        <button id="openBtn">Открыть вкладку</button>
+    </div>
+
+    <script>
+        $(function () {
+            $('#openBtn').click(function () {
+                var method = $('#method').val();
+                var baseUrl = $('#url').val().trim();
+                var userId = $('#userId').val().trim();
+
+                if (!baseUrl) {
+                    alert('Введите URL для подключения');
+                    return;
+                }
+                if (!userId) {
+                    alert('Введите ID пользователя');
+                    return;
+                }
+
+                var fullUrl = baseUrl;
+                var protocolPrefix = '';
+
+                if (method === 'WebSocket') {
+                    protocolPrefix = 'ws://';
+                    fullUrl = protocolPrefix + baseUrl.replace(/^https?:\/\//, '').replace(/^ws:\/\//, '').replace(/^wss:\/\//, '') + '/ws?id=' + encodeURIComponent(userId);
+                } else {
+                    fullUrl = baseUrl + '?id=' + encodeURIComponent(userId);
+                }
+
+                window.open('client.html?url=' + encodeURIComponent(fullUrl) + '&method=' + encodeURIComponent(method), '_blank');
+            });
+        });
+    </script>
+</body>
+
+</html>

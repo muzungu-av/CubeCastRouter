@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Клиент</title>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <style>
+        body {
+            font-family: sans-serif;
+            margin: 20px;
+        }
+
+        .info {
+            padding: 10px;
+            border: 1px solid #ccc;
+            display: inline-block;
+            margin-bottom: 20px;
+        }
+
+        .label {
+            font-weight: bold;
+            padding: 2px 6px;
+            border-radius: 4px;
+            background: #eef;
+            margin-left: 10px;
+        }
+
+        textarea {
+            width: 100%;
+            height: 100px;
+            padding: 5px;
+        }
+
+        button {
+            padding: 6px 12px;
+            margin-top: 10px;
+            cursor: pointer;
+        }
+
+        .output {
+            margin-top: 20px;
+            white-space: pre;
+            border: 1px solid #ddd;
+            padding: 10px;
+            font-family: monospace;
+        }
+
+        .sent {
+            color: blue;
+        }
+
+        .received {
+            color: green;
+        }
+
+        .error {
+            color: red;
+        }
+
+        .ping {
+            color: #ebebeb;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="info">
+        URL: <span id="displayUrl"></span>
+        <span class="label" id="displayMethod"></span>
+    </div>
+
+    <div>
+        <textarea id="message" placeholder="Введите сообщение..."></textarea><br>
+        <button id="sendBtn">Отправить</button>
+    </div>
+
+    <div class="output" id="output"></div>
+
+    <script>
+        $(function () {
+            var params = new URLSearchParams(window.location.search);
+            var fullUrl = decodeURIComponent(params.get('url'));
+            var method = decodeURIComponent(params.get('method'));
+
+            $('#displayUrl').text(fullUrl);
+            $('#displayMethod').text(method);
+
+            var ws, es, polling = false;
+
+            function cleanSpaces(str) {
+                return str.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+            }
+
+            function formatMessage(text) {
+                var cleaned = cleanSpaces(text);
+                if (/"command":"PING"/.test(cleaned)) {
+                    return '<span class="ping">' + cleaned + '</span>';
+                }
+                return cleaned.replace(/"error"/g, '<span class="error">"error"</span>');
+            }
+
+            function appendLine(prefixHtml, textHtml) {
+                var line = prefixHtml + ' ' + textHtml + '\n';
+                $('#output').append(line);
+                $('#output').scrollTop($('#output')[0].scrollHeight);
+            }
+
+            $('#sendBtn').click(function () {
+                var rawMsg = $('#message').val();
+                var msg = cleanSpaces(rawMsg);
+                appendLine('<span class="sent">&gt; Отправка:</span>', msg);
+
+                if (method === 'WebSocket') {
+                    if (!ws || ws.readyState !== WebSocket.OPEN) {
+                        ws = new WebSocket(fullUrl);
+                        ws.onopen = function () { ws.send(msg); };
+                        ws.onmessage = function (e) {
+                            appendLine('<span class="received">&lt;Получено: </span>', formatMessage(e.data));
+                        };
+                        ws.onerror = function () { appendLine('<span class="error">!Ошибка </span>', 'WebSocket'); };
+                    } else {
+                        ws.send(msg);
+                    }
+
+                } else if (method === 'SSE') {
+                    fetch(fullUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: msg })
+                        .then(() => {
+                            if (!es) {
+                                es = new EventSource(fullUrl + '&_=' + Date.now());
+                                es.onmessage = function (e) {
+                                    appendLine('<span class="received">&lt;Получено: </span>', formatMessage(e.data));
+                                };
+                                es.onerror = function () { appendLine('<span class="error">!Ошибка </span>', 'SSE'); es.close(); es = null; };
+                            }
+                        }).catch(() => { appendLine('<span class="error">!Ошибка </span>', 'POST для SSE'); });
+
+                } else if (method === 'Long Polling') {
+                    if (polling) return;
+                    polling = true;
+                    function poll() {
+                        fetch(fullUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: msg })
+                            .then(r => r.text())
+                            .then(text => {
+                                appendLine('<span class="received">&lt;Получено: </span>', formatMessage(text));
+                                setTimeout(poll, 1000);
+                            })
+                            .catch(() => { appendLine('<span class="error">!Ошибка </span>', 'Long Polling'); setTimeout(poll, 3000); });
+                    }
+                    poll();
+                }
+            });
+        });
+    </script>
+</body>
+
+</html>
