@@ -13,17 +13,18 @@ use std::time::Duration;
 use std::time::Instant;
 
 // --- WebSocket актор ---
-struct MyWs {
+pub struct MyWs {
     addr: Addr<BroadcastServer>,
     hb: Instant, // отслеживаем последнее "pong"
+    sender_id: String,
 }
 
 impl MyWs {
-    fn hb(&self, ctx: &mut actix_ws::WebsocketContext<Self>) {
-        ctx.run_interval(Duration::from_secs(10), |act, ctx| {
-            // если последний pong был более 30 секунд назад, закрываем соединение
+    fn start_heartbeat(&self, ctx: &mut actix_ws::WebsocketContext<Self>) {
+        ctx.run_interval(Duration::from_secs(300), |act, ctx| {
+            //таймаут
             if Instant::now().duration_since(act.hb) > Duration::from_secs(30) {
-                println!("WebSocket соединение прервано из-за таймаута");
+                println!("WebSocket {} таймаут, закрытие", act.sender_id);
                 ctx.stop();
                 return;
             }
@@ -35,9 +36,12 @@ impl MyWs {
 impl Actor for MyWs {
     type Context = actix_ws::WebsocketContext<Self>;
     fn started(&mut self, ctx: &mut Self::Context) {
-        self.hb(ctx);
+        self.start_heartbeat(ctx);
         let rec = ctx.address().recipient();
-        self.addr.do_send(RegisterWs(rec));
+        self.addr.do_send(RegisterWs {
+            sender_id: self.sender_id.clone(),
+            rec,
+        });
     }
 }
 
@@ -49,13 +53,13 @@ impl StreamHandler<Result<actix_ws::Message, actix_ws::ProtocolError>> for MyWs 
     ) {
         match msg {
             Ok(actix_ws::Message::Text(text)) => {
-                // 1) Пытаемся распарсить в IncomingMessage
+                // Пытаемся распарсить в IncomingMessage
                 match serde_json::from_str::<IncomingMessage>(&text) {
                     Ok(parsed) => {
-                        // 2) Валидируем
+                        // Валидируем
                         if let Err(err) = parsed.validate() {
                             // Можно отправить клиенту ошибку или просто пропустить
-                            let _ = ctx.text(
+                            let _e = ctx.text(
                                 serde_json::to_string(&serde_json::json!({
                                     "error": format!("Invalid message: {}", err)
                                 }))
@@ -63,8 +67,11 @@ impl StreamHandler<Result<actix_ws::Message, actix_ws::ProtocolError>> for MyWs 
                             );
                             return;
                         }
-                        // 3) Всё ок – рассылаем дальше:
-                        self.addr.do_send(ClientMessage(parsed));
+                        // Всё ок – рассылаем дальше:
+                        self.addr.do_send(ClientMessage {
+                            msg: parsed.clone(),
+                            origin_sender_id: parsed.sender.id.clone(),
+                        });
                     }
                     Err(e) => {
                         // JSON некорректен (не тот формат)
@@ -95,10 +102,9 @@ impl StreamHandler<Result<actix_ws::Message, actix_ws::ProtocolError>> for MyWs 
 
 impl Handler<ClientMessage> for MyWs {
     type Result = ();
-
     fn handle(&mut self, msg: ClientMessage, ctx: &mut Self::Context) {
-        // 1) Сериализуем структуру в JSON-строку
-        let text = match serde_json::to_string(&msg.0) {
+        // Сериализуем структуру в JSON-строку
+        let text = match serde_json::to_string(&msg.msg) {
             Ok(json) => json,
             Err(e) => {
                 eprintln!("Ошибка сериализации IncomingMessage: {}", e);
@@ -106,10 +112,7 @@ impl Handler<ClientMessage> for MyWs {
             }
         };
 
-        // 2) Печатаем в лог уже готовую JSON-строку
-        println!("[WebSocket] Отправлено: {}", text);
-
-        // 3) Отправляем клиенту эту строку
+        // Отправляем клиенту эту строку
         ctx.text(text);
     }
 }

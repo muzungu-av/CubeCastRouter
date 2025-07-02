@@ -12,6 +12,7 @@ dependencies = [
  "actix-web-actors",
  "actix-web-lab",
  "async-stream",
+ "form_urlencoded",
  "futures-core",
  "futures-util",
  "once_cell",

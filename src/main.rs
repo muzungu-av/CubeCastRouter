@@ -7,35 +7,32 @@ mod validator {
     pub mod message;
 }
 
-use crate::validator::message::IncomingMessage;
 use actix::prelude::*;
 use actix_cors::Cors;
 use actix_web::{web, App, HttpServer};
 use config::RoomConfig;
 use once_cell::sync::Lazy;
-use serde::Serialize;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::{mpsc, oneshot};
-use ws::broadcast::BroadcastServer;
+use ws::broadcast::{BroadcastServer, ClientMessage};
 use ws::route::ws_route;
 
 /// файл с конфигом
 static ROOM_CONFIG: Lazy<RoomConfig> =
     Lazy::new(|| RoomConfig::load_from_file("files/example_room.room"));
 
-// --- Сообщение от клиента ---
-#[derive(Message, Clone, Debug, Serialize)]
-#[rtype(result = "()")]
-struct ClientMessage(pub IncomingMessage);
+// // --- Сообщение от клиента ---
+// #[derive(Message, Clone, Debug, Serialize)]
+// #[rtype(result = "()")]
+// struct ClientMessage(pub IncomingMessage);
 
 // --- Состояние приложения ---
 struct AppState {
-    ws_subs: Arc<Mutex<Vec<Recipient<ClientMessage>>>>,
-    sse_senders: Arc<Mutex<Vec<mpsc::UnboundedSender<String>>>>,
-    pub lp_senders: Arc<Mutex<Vec<(usize, oneshot::Sender<String>)>>>,
-    pub lp_next_id: AtomicUsize,
+    pub ws_subs: Arc<Mutex<Vec<(String, Recipient<ClientMessage>)>>>,
+    sse_senders: Arc<Mutex<Vec<(String, mpsc::UnboundedSender<String>)>>>,
+    /// Для каждого LP‑запроса: (sender_id, oneshot::Sender<String>)
+    pub lp_senders: Arc<Mutex<Vec<(String, oneshot::Sender<String>)>>>,
 }
 
 impl AppState {
@@ -44,7 +41,6 @@ impl AppState {
             ws_subs: Arc::new(Mutex::new(Vec::new())),
             sse_senders: Arc::new(Mutex::new(Vec::new())),
             lp_senders: Arc::new(Mutex::new(Vec::new())),
-            lp_next_id: AtomicUsize::new(1),
         }
     }
 }
@@ -79,12 +75,11 @@ async fn main() -> std::io::Result<()> {
             .wrap(Cors::default().allow_any_origin())
             .route("/ws", web::get().to(ws_route))
             .route("/sse", web::get().to(http::sse_handler))
-            .route("/long-polling", web::get().to(http::long_polling_handler))
+            .route("/lp", web::post().to(http::long_polling_handler))
+            .route("/send", web::post().to(http::send_handler))
             .route("/wathing_users", web::post().to(users_list::get_users_list))
     })
     .bind(("127.0.0.1", 7070))?
     .run()
     .await
 }
-
-// и чтобы запрос GetWsClients возвращал Vec<String> с ID активных WS-юзеров.

@@ -41,8 +41,16 @@ impl Validate for IncomingMessage {
         if self.room_id.trim().is_empty() {
             return Err("Поле room_id не должно быть пустым".into());
         }
+        /*
+        "учитель" - проводит занятие
+        "ученик"  - участник занятий
+        "наблюдатель" - наблюает втайне (родитель / невидимый )
+        "ADMIN"       - тоже что наблюдатель (невидимый) и учитель (все права)
+        "heartbeat"   - для PING-сообщений сервера
+        */
         match self.sender.sender_type.as_str() {
-            "учитель" | "ученик" | "наблюдатель" => {}
+            "учитель" | "ученик" | "наблюдатель" | "ADMIN" | "heartbeat" => {
+            }
             other => {
                 return Err(format!(
                     "Неверный sender.type: {}. Должно быть 'учитель', 'ученик' или 'наблюдатель'",
@@ -51,7 +59,6 @@ impl Validate for IncomingMessage {
             }
         }
         if let Some(target) = &self.target {
-            println!(">>{}<<", target.scope.as_str());
             match target.scope.as_str() {
                 "all" => {}
                 "type" => {

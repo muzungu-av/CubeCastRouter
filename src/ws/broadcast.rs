@@ -1,15 +1,35 @@
-use crate::{
-    validator::message::{IncomingMessage, Sender},
-    AppState, ClientMessage, ROOM_CONFIG,
-};
+use crate::{validator::message::IncomingMessage, AppState, ROOM_CONFIG};
 use actix::prelude::*;
+use serde::Serialize;
 use std::time::Duration;
+use tokio::sync::mpsc;
 
 static PING_INTERVAL: u64 = 15;
 
+/// Сообщение, которое идёт через актор BroadcastServer.
+#[derive(Message, Clone, Debug, Serialize)]
+#[rtype(result = "()")]
+pub struct ClientMessage {
+    pub msg: IncomingMessage,
+    /// Кто отправил (sender.id). Если None — значит WS/SSE, иначе LP.
+    pub origin_sender_id: String,
+}
+
+/// Регистрация WebSocket‑подписчика.
 #[derive(Message)]
 #[rtype(result = "()")]
-pub struct RegisterWs(pub Recipient<ClientMessage>);
+pub struct RegisterWs {
+    pub sender_id: String,
+    pub rec: Recipient<ClientMessage>,
+}
+
+/// Регистрация SSE‑подписчика.
+#[derive(Message)]
+#[rtype(result = "()")]
+pub struct RegisterSse {
+    pub sender_id: String,
+    pub tx: mpsc::UnboundedSender<String>,
+}
 
 pub struct BroadcastServer {
     pub state: actix_web::web::Data<AppState>,
@@ -27,37 +47,40 @@ pub struct GetCount;
 
 impl Actor for BroadcastServer {
     type Context = Context<Self>;
+
     fn started(&mut self, ctx: &mut Self::Context) {
         let state = self.state.clone();
+
         ctx.run_interval(Duration::from_secs(PING_INTERVAL), move |_act, _ctx| {
             let state = state.clone();
             actix::spawn(async move {
-                // 1) SSE: отправляем пустую строку, чтобы выявить отвалившиеся соединения
+                // SSE: heartbeat
                 {
-                    let mut senders = state.sse_senders.lock().await;
-                    senders.retain(|tx| tx.send(String::new()).is_ok());
+                    let mut sse = state.sse_senders.lock().await;
+                    sse.retain(|(_, tx)| tx.send(String::new()).is_ok());
                 }
 
-                // 2) WebSocket: шлём «ping»-IncomingMessage, чтобы оставить только живые подписки
+                // WebSocket: ping‑сообщение для чистки мёртвых
                 {
                     // Собираем шаблон валидного IncomingMessage:
                     let ping_msg = IncomingMessage {
                         // Берём любую непустую строку, допустим, из конфига:
                         room_id: ROOM_CONFIG.room.clone(),
-                        sender: Sender {
+                        sender: crate::validator::message::Sender {
                             id: String::new(),
-                            sender_type: "наблюдатель".to_string(), // один из разрешённых типов
+                            sender_type: "heartbeat".to_string(),
                         },
                         target: None,
                         msg_command: "PING".to_string(),
                         payload: None,
                     };
-
-                    // Оборачиваем в ClientMessage и клонируем для каждого получателя
-                    let ping_client_msg = ClientMessage(ping_msg.clone());
+                    let ping_client = ClientMessage {
+                        msg: ping_msg.clone(),
+                        origin_sender_id: String::new(),
+                    };
 
                     let mut subs = state.ws_subs.lock().await;
-                    subs.retain(|rec| rec.try_send(ping_client_msg.clone()).is_ok());
+                    subs.retain(|(_, rec)| rec.try_send(ping_client.clone()).is_ok());
                 }
             });
         });
@@ -68,11 +91,9 @@ impl Handler<RegisterWs> for BroadcastServer {
     type Result = ();
     fn handle(&mut self, msg: RegisterWs, _: &mut Self::Context) {
         let state = self.state.clone();
-        let recipient = msg.0;
-
         actix::spawn(async move {
             let mut subs = state.ws_subs.lock().await;
-            subs.push(recipient);
+            subs.push((msg.sender_id, msg.rec));
         });
     }
 }
@@ -87,29 +108,60 @@ impl Handler<GetCount> for BroadcastServer {
 
 impl Handler<ClientMessage> for BroadcastServer {
     type Result = ();
+
     fn handle(&mut self, msg: ClientMessage, _: &mut Self::Context) {
-        // msg.0 – это IncomingMessage
-        let serialized = serde_json::to_string(&msg.0).unwrap();
+        let text = serde_json::to_string(&msg.msg).unwrap();
         let state = self.state.clone();
+
+        println!("> {}", text);
         actix::spawn(async move {
-            // 1) WebSocket
             {
                 let mut subs = state.ws_subs.lock().await;
-                subs.retain(|rec| rec.try_send(ClientMessage(msg.0.clone())).is_ok());
+                let mut keep = Vec::new();
+                for (sid, rec) in subs.drain(..) {
+                    //todo убрать msg.origin_sender_id.clone()
+                    if sid != msg.origin_sender_id {
+                        let _ = rec.do_send(ClientMessage {
+                            msg: msg.msg.clone(),
+                            origin_sender_id: msg.origin_sender_id.clone(),
+                        });
+                    } else {
+                        // свой не получает
+                    }
+                    // в любом случае WS‑клиент остаётся подписанным
+                    keep.push((sid, rec));
+                }
+                *subs = keep;
             }
 
-            // 2) SSE
+            // SSE — аналогично
             {
-                let mut senders = state.sse_senders.lock().await;
-                senders.retain(|tx| tx.send(serialized.clone()).is_ok());
+                let mut sse = state.sse_senders.lock().await;
+                let mut keep = Vec::new();
+                for (sid, tx) in sse.drain(..) {
+                    if sid.clone() != msg.origin_sender_id.clone() {
+                        let _ = tx.send(text.clone());
+                    }
+                    keep.push((sid, tx));
+                }
+                *sse = keep;
             }
 
-            // 3) Long-Polling: раздаём всем (id, tx) и сразу очищаем вектор
+            // Long‑Polling — рассылка чужим LP и удаление их
             {
                 let mut lps = state.lp_senders.lock().await;
-                for (_sid, one_tx) in lps.drain(..) {
-                    let _ = one_tx.send(serialized.clone());
+                let mut keep = Vec::new();
+                for (sid, tx) in lps.drain(..) {
+                    if sid != msg.origin_sender_id.clone() {
+                        // чужим — отправляем
+                        let _ = tx.send(text.clone());
+                        // и не сохраняем, т.к. одноразовый канал
+                    } else {
+                        // своему — не шлём, но сохраняем, чтобы он мог ждать дальше
+                        keep.push((sid, tx));
+                    }
                 }
+                *lps = keep;
             }
         });
     }
