@@ -9,6 +9,7 @@
         body {
             font-family: sans-serif;
             margin: 20px;
+            background-color: #4B4C53;
         }
 
         .info {
@@ -47,11 +48,11 @@
         }
 
         .sent {
-            color: blue;
+            color: #77f;
         }
 
         .received {
-            color: green;
+            color: #7f7;
         }
 
         .error {
@@ -69,23 +70,27 @@
         URL: <span id="displayUrl"></span>
         <span class="label" id="displayMethod"></span>
     </div>
-
-    <div>
-        <textarea id="message" placeholder="Введите сообщение..."></textarea><br>
-        <button id="sendBtn">Отправить</button>
-    </div>
-
-    <div class="output" id="output"></div>
+    <br id="inputSection">
+    <textarea id="message" placeholder="Введите сообщение..."></textarea></br>
+    <button id="sendBtn">Отправить</button>
+    <div class="output ping" id="output"></div>
 
     <script>
         $(function () {
             var params = new URLSearchParams(window.location.search);
             var fullUrl = decodeURIComponent(params.get('url'));
             var method = decodeURIComponent(params.get('method'));
-
+            var userId = decodeURIComponent(params.get('userId'));
             $('#displayUrl').text(fullUrl);
             $('#displayMethod').text(method);
-
+            $('#message').val(`{
+                "room_id":"room_568491",
+                "sender":{
+                    "id":"${userId}",
+                    "type":"наблюдатель"
+                },
+                "command":"******"
+            }`);
             var ws, es, polling = false;
 
             function cleanSpaces(str) {
@@ -100,54 +105,72 @@
                 return cleaned.replace(/"error"/g, '<span class="error">"error"</span>');
             }
 
-            function appendLine(prefixHtml, textHtml) {
+            function prependLine(prefixHtml, textHtml) {
                 var line = prefixHtml + ' ' + textHtml + '\n';
-                $('#output').append(line);
-                $('#output').scrollTop($('#output')[0].scrollHeight);
+                $('#output').prepend(line);
+            }
+
+            // SSE: подписка сразу, но оставляем ввод
+            if (method === 'SSE') {
+                let urlObj = new URL(fullUrl);
+                if (!urlObj.searchParams.has('id')) {
+                    urlObj.searchParams.append('id', userId);
+                }
+                es = new EventSource(urlObj.toString());
+
+                // es = new EventSource(fullUrl);
+                es.onmessage = function (e) {
+                    prependLine('<span class="received">&lt; Получено:</span>', formatMessage(e.data));
+                };
+                es.onerror = function () {
+                    prependLine('<span class="error">!Ошибка</span>', 'SSE');
+                    es.close();
+                };
             }
 
             $('#sendBtn').click(function () {
                 var rawMsg = $('#message').val();
                 var msg = cleanSpaces(rawMsg);
-                appendLine('<span class="sent">&gt; Отправка:</span>', msg);
+                prependLine('<span class="sent">&gt; Отправка:</span>', msg);
 
                 if (method === 'WebSocket') {
                     if (!ws || ws.readyState !== WebSocket.OPEN) {
                         ws = new WebSocket(fullUrl);
                         ws.onopen = function () { ws.send(msg); };
                         ws.onmessage = function (e) {
-                            appendLine('<span class="received">&lt;Получено: </span>', formatMessage(e.data));
+                            prependLine('<span class="received">&lt; Получено:</span>', formatMessage(e.data));
                         };
-                        ws.onerror = function () { appendLine('<span class="error">!Ошибка </span>', 'WebSocket'); };
+                        ws.onerror = function () { prependLine('<span class="error">!Ошибка</span>', 'WebSocket'); };
                     } else {
                         ws.send(msg);
                     }
 
                 } else if (method === 'SSE') {
-                    fetch(fullUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: msg })
-                        .then(() => {
-                            if (!es) {
-                                es = new EventSource(fullUrl + '&_=' + Date.now());
-                                es.onmessage = function (e) {
-                                    appendLine('<span class="received">&lt;Получено: </span>', formatMessage(e.data));
-                                };
-                                es.onerror = function () { appendLine('<span class="error">!Ошибка </span>', 'SSE'); es.close(); es = null; };
-                            }
-                        }).catch(() => { appendLine('<span class="error">!Ошибка </span>', 'POST для SSE'); });
+                    var sendUrl = fullUrl.replace(/\/sse\?/, '/send?');
+                    fetch(sendUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: msg })
+                        .then(response => response.text())
+                        .then(resp => prependLine('<span class="received">&lt; Ответ:</span>', cleanSpaces(resp)))
+                        .catch(() => prependLine('<span class="error">!Ошибка</span>', 'POST для SEND'));
 
                 } else if (method === 'Long Polling') {
-                    if (polling) return;
-                    polling = true;
-                    function poll() {
-                        fetch(fullUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: msg })
-                            .then(r => r.text())
-                            .then(text => {
-                                appendLine('<span class="received">&lt;Получено: </span>', formatMessage(text));
-                                setTimeout(poll, 1000);
-                            })
-                            .catch(() => { appendLine('<span class="error">!Ошибка </span>', 'Long Polling'); setTimeout(poll, 3000); });
+                    // сначала отправить на /send
+                    var sendUrl = fullUrl.replace(/\/lp\?/, '/send?');
+                    fetch(sendUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: msg })
+                        .catch(() => prependLine('<span class="error">!Ошибка</span>', 'POST для SEND'));
+                    // затем начать цикл опроса, если ещё не запущен
+                    if (!polling) {
+                        polling = true;
+                        function poll() {
+                            fetch(fullUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: msg })
+                                .then(r => r.text())
+                                .then(text => {
+                                    prependLine('<span class="received">&lt; Получено:</span>', formatMessage(text));
+                                    setTimeout(poll, 1000);
+                                })
+                                .catch(() => { prependLine('<span class="error">!Ошибка</span>', 'Long Polling'); setTimeout(poll, 1000); });
+                        }
+                        poll();
                     }
-                    poll();
                 }
             });
         });

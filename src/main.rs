@@ -9,6 +9,7 @@ mod validator {
 
 use actix::prelude::*;
 use actix_cors::Cors;
+use actix_web::http::header;
 use actix_web::{web, App, HttpServer};
 use config::RoomConfig;
 use once_cell::sync::Lazy;
@@ -23,10 +24,6 @@ static ROOM_CONFIG: Lazy<RoomConfig> =
     Lazy::new(|| RoomConfig::load_from_file("files/example_room.room"));
 
 // // --- Сообщение от клиента ---
-// #[derive(Message, Clone, Debug, Serialize)]
-// #[rtype(result = "()")]
-// struct ClientMessage(pub IncomingMessage);
-
 // --- Состояние приложения ---
 struct AppState {
     pub ws_subs: Arc<Mutex<Vec<(String, Recipient<ClientMessage>)>>>,
@@ -72,7 +69,21 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(state.clone())
             .app_data(srv_data.clone())
-            .wrap(Cors::default().allow_any_origin())
+            .wrap(
+                Cors::default()
+                    // Разрешить любые источники (в dev‑режиме; в проде лучше ужесточить)
+                    .allow_any_origin()
+                    // Разрешаем нужные HTTP‑методы
+                    .allowed_methods(vec!["GET", "POST", "OPTIONS"])
+                    // Разрешаем заголовок Content-Type
+                    .allowed_header(header::CONTENT_TYPE)
+                    // Если нужны другие кастомные заголовки, добавь их здесь:
+                    // .allowed_header(header::AUTHORIZATION)
+                    // Не забудь ответить на preflight-запросы
+                    .supports_credentials() // если используешь куки/авторизацию
+                    // TTL для preflight (в секундах)
+                    .max_age(3600),
+            )
             .route("/ws", web::get().to(ws_route))
             .route("/sse", web::get().to(http::sse_handler))
             .route("/lp", web::post().to(http::long_polling_handler))
@@ -83,3 +94,11 @@ async fn main() -> std::io::Result<()> {
     .run()
     .await
 }
+
+// и чтобы запрос GetWsClients возвращал Vec<String> с ID активных WS-юзеров.
+
+//todo проверить что сообщения не рассылаются самому себе по SSE  (LP WS  вроде сделано)
+//todo для sse_handler нет POST body данных для аутентификации
+//todo аутентификация (может быть и подпись signed сообщений)
+//todo  отправляемые команды нужно по всем каналам валидировать тоже (какие бывают) и исполнять (какой-то паттерн)
+//todo накопление сообщений

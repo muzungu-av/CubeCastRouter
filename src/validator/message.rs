@@ -21,12 +21,16 @@ pub struct Target {
 pub struct IncomingMessage {
     #[serde(rename = "room_id")]
     pub room_id: String,
+
     pub sender: Sender,
+
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<Target>,
-    #[serde(rename = "command")]
-    pub msg_command: String,
+
+    #[serde(rename = "command", default, skip_serializing_if = "Option::is_none")]
+    pub msg_command: Option<String>,
+
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload: Option<Value>,
@@ -85,8 +89,13 @@ impl Validate for IncomingMessage {
                 }
             }
         }
-        if self.msg_command.trim().is_empty() {
-            return Err("Поле msg_command не должно быть пустым".into());
+        // для клиентов это поле может быть пустым
+        // так как они обращаются к роуту /lp /sse подключаются только для прослушивания
+        // аутентификация нужна (поля room_id, sender) но команды давать не обязательно
+        if let Some(command) = &self.msg_command {
+            if command.trim().is_empty() {
+                // return Err("Поле command не должно быть пустым".into());
+            }
         }
         Ok(())
     }

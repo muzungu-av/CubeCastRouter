@@ -9,6 +9,7 @@
         body {
             font-family: sans-serif;
             margin: 20px;
+            background-color: #4B4C53;
         }
 
         .header {
@@ -37,7 +38,7 @@
             <option>SSE</option>
             <option>Long Polling</option>
         </select>
-        <input type="text" id="url" placeholder="URL backend" size="30" />
+        <input type="text" id="url" value="127.0.0.1:7070" placeholder="URL backend" size="30" />
         <input type="text" id="userId" placeholder="ID пользователя" size="15" />
         <button id="openBtn">Открыть вкладку</button>
     </div>
@@ -49,26 +50,21 @@
                 var baseUrl = $('#url').val().trim();
                 var userId = $('#userId').val().trim();
 
-                if (!baseUrl) {
-                    alert('Введите URL для подключения');
-                    return;
-                }
-                if (!userId) {
-                    alert('Введите ID пользователя');
-                    return;
-                }
+                if (!baseUrl) { alert('Введите URL'); return; }
+                if (!userId) { alert('Введите ID пользователя'); return; }
 
-                var fullUrl = baseUrl;
-                var protocolPrefix = '';
-
+                var fullUrl;
                 if (method === 'WebSocket') {
-                    protocolPrefix = 'ws://';
-                    fullUrl = protocolPrefix + baseUrl.replace(/^https?:\/\//, '').replace(/^ws:\/\//, '').replace(/^wss:\/\//, '') + '/ws?id=' + encodeURIComponent(userId);
-                } else {
-                    fullUrl = baseUrl + '?id=' + encodeURIComponent(userId);
+                    fullUrl = 'ws://' + baseUrl.replace(/^https?:\/\//, '') + '/ws?id=' + encodeURIComponent(userId);
+                } else if (method === 'SSE') {
+                    fullUrl = 'http://' + baseUrl.replace(/^https?:\/\//, '') + '/sse?id=' + encodeURIComponent(userId);
+                } else { // Long Polling
+                    fullUrl = 'http://' + baseUrl.replace(/^https?:\/\//, '') + '/lp?id=' + encodeURIComponent(userId);
                 }
 
-                window.open('client.html?url=' + encodeURIComponent(fullUrl) + '&method=' + encodeURIComponent(method), '_blank');
+                window.open('client.html?url=' + encodeURIComponent(fullUrl) +
+                    '&method=' + encodeURIComponent(method) +
+                    '&userId=' + encodeURIComponent(userId), '_blank');
             });
         });
     </script>

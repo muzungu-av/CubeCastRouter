@@ -2,7 +2,6 @@ use crate::{validator::message::IncomingMessage, AppState, ROOM_CONFIG};
 use actix::prelude::*;
 use serde::Serialize;
 use std::time::Duration;
-use tokio::sync::mpsc;
 
 static PING_INTERVAL: u64 = 15;
 
@@ -11,7 +10,7 @@ static PING_INTERVAL: u64 = 15;
 #[rtype(result = "()")]
 pub struct ClientMessage {
     pub msg: IncomingMessage,
-    /// Кто отправил (sender.id). Если None — значит WS/SSE, иначе LP.
+    /// Кто отправил (sender.id)
     pub origin_sender_id: String,
 }
 
@@ -21,14 +20,6 @@ pub struct ClientMessage {
 pub struct RegisterWs {
     pub sender_id: String,
     pub rec: Recipient<ClientMessage>,
-}
-
-/// Регистрация SSE‑подписчика.
-#[derive(Message)]
-#[rtype(result = "()")]
-pub struct RegisterSse {
-    pub sender_id: String,
-    pub tx: mpsc::UnboundedSender<String>,
 }
 
 pub struct BroadcastServer {
@@ -71,7 +62,7 @@ impl Actor for BroadcastServer {
                             sender_type: "heartbeat".to_string(),
                         },
                         target: None,
-                        msg_command: "PING".to_string(),
+                        msg_command: Some("PING".to_string()),
                         payload: None,
                     };
                     let ping_client = ClientMessage {
@@ -115,6 +106,7 @@ impl Handler<ClientMessage> for BroadcastServer {
 
         println!("> {}", text);
         actix::spawn(async move {
+            // WS
             {
                 let mut subs = state.ws_subs.lock().await;
                 let mut keep = Vec::new();
@@ -134,16 +126,22 @@ impl Handler<ClientMessage> for BroadcastServer {
                 *subs = keep;
             }
 
-            // SSE — аналогично
+            // SSE
             {
                 let mut sse = state.sse_senders.lock().await;
                 let mut keep = Vec::new();
                 for (sid, tx) in sse.drain(..) {
-                    if sid.clone() != msg.origin_sender_id.clone() {
+                    if sid != msg.origin_sender_id {
                         let _ = tx.send(text.clone());
                     }
                     keep.push((sid, tx));
                 }
+                // for (sid, tx) in sse.drain(..) {
+                //     if sid.clone() != msg.origin_sender_id.clone() {
+                //         let _ = tx.send(text.clone());
+                //     }
+                //     keep.push((sid, tx));
+                // }
                 *sse = keep;
             }
 
